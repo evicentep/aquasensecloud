@@ -1,0 +1,179 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Proyecto ICAP - Infraestructura inicial
+
+Parameters:
+  AdminCidr:
+    Type: String
+    Description: Your trusted IPv4 CIDR for SSH and temporary Flask testing (e.g. a single /32).
+    AllowedPattern: '(\d{1,3}\.){3}\d{1,3}/\d{1,2}'
+  ImageId:
+    Type: AWS::EC2::Image::Id
+    Description: Amazon Linux 2023 AMI in the selected region.
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+  InstanceProfileName:
+    Type: String
+    Description: Existing EC2 instance profile with the required permissions.
+
+Resources:
+
+  ## VPC
+
+  ProyVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 192.168.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: proy-vpc
+
+  ## Internet Gateway
+  
+  ProyInternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: proy-internet-gateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref ProyVPC
+      InternetGatewayId: !Ref ProyInternetGateway
+
+  ## Public Route Table
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ProyVPC
+      Tags:
+        - Key: Name
+          Value: proy-public-rtb
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref ProyInternetGateway
+
+  ## Public Subnets
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ProyVPC
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      CidrBlock: 192.168.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: proy-subred-publica-a
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ProyVPC
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      CidrBlock: 192.168.2.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: proy-subred-publica-b
+
+  Subnet1RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  Subnet2RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  ## Security Groups
+ 
+  BalanceadorSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Permite HTTP desde cualquier origen
+      VpcId: !Ref ProyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: proy-BalanceadorSecurityGroup
+
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Permitir trafico al puerto 5000 (de Flask) desde el balanceador
+      VpcId: !Ref ProyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          SourceSecurityGroupId: !Ref BalanceadorSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0 # Salida a internet para alcanzar S3
+      Tags:
+        - Key: Name
+          Value: proy-TaskSecurityGroup
+
+  DockerInstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Permitir acceso por SSH y testeo de Flask
+      VpcId: !Ref ProyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AdminCidr
+        - IpProtocol: tcp
+          FromPort: 5000
+          ToPort: 5000
+          CidrIp: !Ref AdminCidr
+      Tags:
+        - Key: Name
+          Value: proy-DockerInstanceSecurityGroup
+
+  ## Docker Instance
+  
+  DockerInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t2.micro
+      ImageId: !Ref ImageId
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref InstanceProfileName
+      NetworkInterfaces:
+        - GroupSet:
+            - !Ref DockerInstanceSecurityGroup
+          AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          DeleteOnTermination: true
+          SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: proy-DockerInstance
+      UserData:
+        Fn::Base64: !Sub | 
+          #!/bin/bash
+          dnf update -y
+          #install Docker
+          dnf -y install docker
+          systemctl enable --now docker
